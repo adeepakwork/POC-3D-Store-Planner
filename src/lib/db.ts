@@ -335,13 +335,22 @@ export async function deleteInventoryProduct(productId: string): Promise<void> {
 
 export interface PlacedBoxData {
     id?: string;
-    boxId: string;
+    boxId: string;           // Original box ID that was picked up
     productId: string;
-    aisleId: string;
+    productName: string;
+    aisleId: string;         // Destination aisle
+    unitIndex: number;       // Which rack unit in the aisle
+    shelfLevel: number;      // Which shelf (1-indexed)
+    x: number;               // Local X position on shelf
+    z: number;               // Local Z position on shelf
+    width: number;           // Box dimensions
+    height: number;
+    depth: number;
+    labelColor: string;
     userId: string;
     storeId: string;
-    originalPosition: { x: number; y: number; z: number };
-    newPosition: { x: number; y: number; z: number };
+    sourceAisleId: string;   // Original aisle (for undo)
+    sourceShelfLevel: number; // Original shelf (for undo)
     movedAt?: Date;
 }
 
@@ -375,11 +384,20 @@ export async function getStorePlacedBoxes(storeId: string): Promise<PlacedBoxDat
                 id: doc.id,
                 boxId: data.boxId,
                 productId: data.productId,
+                productName: data.productName || '',
                 aisleId: data.aisleId,
+                unitIndex: data.unitIndex || 0,
+                shelfLevel: data.shelfLevel || 1,
+                x: data.x || data.newPosition?.x || 0,
+                z: data.z || data.newPosition?.z || 0,
+                width: data.width || 0.25,
+                height: data.height || 0.2,
+                depth: data.depth || 0.2,
+                labelColor: data.labelColor || '#3B82F6',
                 userId: data.userId,
                 storeId: data.storeId,
-                originalPosition: data.originalPosition,
-                newPosition: data.newPosition,
+                sourceAisleId: data.sourceAisleId || data.aisleId,
+                sourceShelfLevel: data.sourceShelfLevel || 1,
                 movedAt: data.movedAt?.toDate() || new Date(),
             });
         });

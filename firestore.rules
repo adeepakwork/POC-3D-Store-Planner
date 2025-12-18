@@ -1,0 +1,71 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Users collection - users can only read/write their own document
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Stores collection - users can only manage their own stores
+    match /stores/{storeId} {
+      // Allow users to read/write stores they own
+      allow read, write: if request.auth != null && resource.data.userId == request.auth.uid;
+      
+      // Allow creating new stores
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      
+      // Allow deletion of own stores
+      allow delete: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+    
+    // Aisles collection - separate from stores
+    match /aisles/{aisleId} {
+      // Helper function to check store ownership
+      function ownsStore(storeId) {
+        return request.auth != null && 
+               get(/databases/$(database)/documents/stores/$(storeId)).data.userId == request.auth.uid;
+      }
+      
+      // Can read aisle if you own the parent store
+      allow read: if request.auth != null && ownsStore(resource.data.storeId);
+      
+      // Can create aisle if you own the parent store
+      allow create: if request.auth != null && ownsStore(request.resource.data.storeId);
+      
+      // Can update/delete aisle if you own the parent store
+      allow update, delete: if request.auth != null && ownsStore(resource.data.storeId);
+    }
+    
+    // Inventory collection - users can only manage their own inventory
+    match /inventory/{productId} {
+      // Can read inventory if user owns it
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      
+      // Can create inventory with own userId
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      
+      // Can update/delete own inventory
+      allow update, delete: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+    
+    // Placed Boxes collection - for box pick-and-place feature
+    match /placedBoxes/{boxId} {
+      // Helper function to check store ownership for placed boxes
+      function ownsPlacedBoxStore(storeId) {
+        return request.auth != null && 
+               get(/databases/$(database)/documents/stores/$(storeId)).data.userId == request.auth.uid;
+      }
+      
+      // Can read placed boxes if user owns the store they belong to
+      allow read: if request.auth != null && ownsPlacedBoxStore(resource.data.storeId);
+      
+      // Can create placed boxes for stores user owns
+      allow create: if request.auth != null && ownsPlacedBoxStore(request.resource.data.storeId);
+      
+      // Can update/delete placed boxes for stores user owns
+      allow update, delete: if request.auth != null && ownsPlacedBoxStore(resource.data.storeId);
+    }
+  }
+}

@@ -70,6 +70,68 @@ function createESLTexture(product: InventoryProduct, quantity: number): THREE.Ca
     return texture;
 }
 
+// Glowing Vacant Spot Indicator Component
+function VacantSpotIndicator({
+    position,
+    width,
+    height,
+    depth,
+    onClick,
+    spotId,
+    isTargeted = false
+}: {
+    position: [number, number, number];
+    width: number;
+    height: number;
+    depth: number;
+    onClick: () => void;
+    spotId: string;
+    isTargeted?: boolean;
+}) {
+    const meshRef = useRef<THREE.Mesh>(null);
+
+    // Set userData for raycast detection
+    useEffect(() => {
+        if (meshRef.current) {
+            meshRef.current.userData = { vacantSpotId: spotId, isVacantSpot: true };
+        }
+    }, [spotId]);
+
+    // Simple animation - brighter when targeted
+    useFrame((state) => {
+        if (meshRef.current) {
+            const material = meshRef.current.material as THREE.MeshBasicMaterial;
+            if (isTargeted) {
+                // Solid bright when targeted
+                material.opacity = 0.85;
+                material.color.set('#fbbf24');  // Amber/yellow when targeted
+            } else {
+                // Subtle pulse when not targeted
+                material.opacity = 0.2 + Math.sin(state.clock.elapsedTime * 2) * 0.1;
+                material.color.set('#22c55e');  // Green when available
+            }
+        }
+    });
+
+    return (
+        <mesh
+            ref={meshRef}
+            position={position}
+            onClick={(e) => {
+                e.stopPropagation();
+                onClick();
+            }}
+        >
+            <boxGeometry args={[width * 0.95, height, depth * 0.95]} />
+            <meshBasicMaterial
+                color={isTargeted ? '#fbbf24' : '#22c55e'}
+                transparent
+                opacity={isTargeted ? 0.85 : 0.3}
+            />
+        </mesh>
+    );
+}
+
 // Create rack unit with proper 4 corner posts and shelf beams
 function RackUnit({
     width,
@@ -78,7 +140,15 @@ function RackUnit({
     levels,
     position,
     boxes,
-    onBoxClick
+    onBoxClick,
+    pickedBoxIds,
+    showVacantSpots,
+    vacantSpotSize,
+    onVacantSpotClick,
+    unitIndex,
+    aisleId,
+    targetedSpotId,
+    rackSide
 }: {
     width: number;
     depth: number;
@@ -87,6 +157,14 @@ function RackUnit({
     position: [number, number, number];
     boxes: { shelfLevel: number; boxData: BoxData[] }[];
     onBoxClick?: (boxData: BoxData) => void;
+    pickedBoxIds?: Set<string>;
+    showVacantSpots?: boolean;
+    vacantSpotSize?: { width: number; height: number; depth: number };
+    onVacantSpotClick?: (shelfLevel: number, x: number, z: number) => void;
+    unitIndex: number;
+    aisleId: string;
+    targetedSpotId?: string | null;
+    rackSide: 'left' | 'right';
 }) {
     const levelHeight = height / levels;
     const halfW = width / 2;
@@ -114,7 +192,36 @@ function RackUnit({
             {/* Horizontal Beams for each level */}
             {Array.from({ length: levels }).map((_, i) => {
                 const y = (i + 1) * levelHeight;
-                const shelfBoxes = boxes.find(b => b.shelfLevel === i + 1)?.boxData || [];
+                const allShelfBoxes = boxes.find(b => b.shelfLevel === i + 1)?.boxData || [];
+                // Filter out picked-up boxes
+                const shelfBoxes = pickedBoxIds
+                    ? allShelfBoxes.filter(box => !pickedBoxIds.has(box.boxId))
+                    : allShelfBoxes;
+
+                // Calculate vacant spots if needed
+                const vacantSpots: Array<{ x: number; z: number }> = [];
+                if (showVacantSpots && vacantSpotSize) {
+                    const startX = -width / 2 + POST_SIZE + 0.1;
+                    const startZ = -depth / 2 + POST_SIZE + 0.1;
+                    const endX = width / 2 - POST_SIZE - 0.1;
+                    const endZ = depth / 2 - POST_SIZE - 0.1;
+
+                    // Simple grid-based vacant spots
+                    for (let x = startX; x + vacantSpotSize.width <= endX; x += vacantSpotSize.width + BOX_GAP) {
+                        for (let z = startZ; z + vacantSpotSize.depth <= endZ; z += vacantSpotSize.depth + BOX_GAP) {
+                            // Check if this position overlaps with any existing box
+                            const spotX = x + vacantSpotSize.width / 2;
+                            const spotZ = z + vacantSpotSize.depth / 2;
+                            const overlaps = shelfBoxes.some(box => {
+                                return Math.abs(box.x - spotX) < (box.width + vacantSpotSize.width) / 2 &&
+                                    Math.abs(box.z - spotZ) < (box.depth + vacantSpotSize.depth) / 2;
+                            });
+                            if (!overlaps) {
+                                vacantSpots.push({ x: spotX, z: spotZ });
+                            }
+                        }
+                    }
+                }
 
                 return (
                     <group key={`level-${i}`}>
@@ -175,6 +282,23 @@ function RackUnit({
                             </group>
                         ))}
 
+                        {/* Vacant Spot Indicators */}
+                        {showVacantSpots && vacantSpotSize && vacantSpots.map((spot, vIdx) => {
+                            const spotId = `${aisleId}-${unitIndex}-${rackSide}-${i + 1}-${vIdx}`;
+                            return (
+                                <VacantSpotIndicator
+                                    key={`vacant-${vIdx}`}
+                                    spotId={spotId}
+                                    position={[spot.x, y + vacantSpotSize.height / 2 + 0.03, spot.z]}
+                                    width={vacantSpotSize.width}
+                                    height={vacantSpotSize.height}
+                                    depth={vacantSpotSize.depth}
+                                    onClick={() => onVacantSpotClick?.(i + 1, spot.x, spot.z)}
+                                    isTargeted={targetedSpotId === spotId}
+                                />
+                            );
+                        })}
+
                         {/* ESL Price Tags - one per unique product on the shelf edge */}
                         {(() => {
                             const seenProducts = new Set<string>();
@@ -214,6 +338,10 @@ function RackUnit({
 
 // Box data type
 type BoxData = {
+    boxId: string;      // Unique ID for tracking picked-up boxes
+    aisleId: string;    // Which aisle this box belongs to
+    shelfLevel: number; // Which shelf level (1-indexed)
+    unitIndex: number;  // Which rack unit in the aisle
     x: number;
     z: number;
     width: number;
@@ -225,12 +353,44 @@ type BoxData = {
     quantity: number; // Total quantity for this product on this shelf
 };
 
-// Generate boxes for a shelf based on products
+// Vacant spot data for placement indicators
+type VacantSpot = {
+    x: number;
+    z: number;
+    width: number;
+    height: number;
+    depth: number;
+    shelfLevel: number;
+    unitIndex: number;
+    aisleId: string;
+    worldPosition: [number, number, number]; // Absolute world position for rendering
+};
+
+// Placed box data with full visual info for rendering
+type PlacedBoxData = {
+    id: string;
+    aisleId: string;
+    unitIndex: number;
+    shelfLevel: number;
+    x: number;  // Local X position on shelf
+    z: number;  // Local Z position on shelf
+    width: number;
+    height: number;
+    depth: number;
+    labelColor: string;
+    productId: string;
+    productName: string;
+};
+
+// Generate boxes for a shelf based on products (legacy helper)
 function generateBoxesForShelf(
     shelfWidth: number,
     shelfDepth: number,
     products: AisleProduct[],
-    inventoryMap: Record<string, InventoryProduct>
+    inventoryMap: Record<string, InventoryProduct>,
+    aisleId: string = 'unknown',
+    shelfLevel: number = 1,
+    unitIndex: number = 0
 ): BoxData[] {
     const boxes: BoxData[] = [];
 
@@ -242,6 +402,7 @@ function generateBoxesForShelf(
 
     let cursorX = startX;
     let cursorZ = startZ;
+    let boxIdx = 0;
 
     for (const prod of products) {
         const invItem = inventoryMap[prod.productId];
@@ -271,7 +432,14 @@ function generateBoxesForShelf(
                 break; // Shelf is full
             }
 
+            const boxId = `${aisleId}-${prod.productId}-${shelfLevel}-${unitIndex}-${boxIdx}`;
+            boxIdx++;
+
             boxes.push({
+                boxId,
+                aisleId,
+                shelfLevel,
+                unitIndex,
                 x: cursorX + boxW / 2,
                 z: cursorZ + boxD / 2,
                 width: boxW,
@@ -437,10 +605,24 @@ function StoreBuilding({ width, depth, height = 8, storeName = 'STORE', storeCol
 }
 
 // Main Aisle Component - distributes boxes across ALL shelves and rack units
-function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
+function AisleRacks({
+    aisle,
+    inventoryMap,
+    onBoxClick,
+    pickedBoxIds,
+    showVacantSpots,
+    heldBoxSize,
+    onVacantSpotClick,
+    targetedSpotId
+}: {
     aisle: Aisle;
     inventoryMap: Record<string, InventoryProduct>;
     onBoxClick?: (boxData: BoxData) => void;
+    pickedBoxIds?: Set<string>;
+    showVacantSpots?: boolean;
+    heldBoxSize?: { width: number; height: number; depth: number };
+    onVacantSpotClick?: (aisleId: string, unitIndex: number, shelfLevel: number, x: number, z: number) => void;
+    targetedSpotId?: string | null;
 }) {
     // An aisle has two racks - left and right side
     const rackWidth = 3;  // Width of each rack unit
@@ -449,6 +631,9 @@ function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
 
     // Calculate number of rack units along the aisle
     const numUnits = Math.max(1, Math.floor(aisle.length / rackWidth));
+
+    // Track box index for unique IDs
+    let boxIndex = 0;
 
     // Generate ALL boxes for the aisle and distribute them across shelves/units
     const boxesByUnitAndLevel = useMemo(() => {
@@ -468,12 +653,13 @@ function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
         }
 
         // Track cursor position for each shelf level (to continue where we left off)
-        const shelfCursors: Map<number, { unit: number; x: number; z: number }> = new Map();
+        const shelfCursors: Map<number, { unit: number; x: number; z: number; boxIdx: number }> = new Map();
         for (let l = 1; l <= aisle.shelves; l++) {
             shelfCursors.set(l, {
                 unit: 0,
                 x: -rackWidth / 2 + POST_SIZE + 0.1,
-                z: -rackDepth / 2 + POST_SIZE + 0.1
+                z: -rackDepth / 2 + POST_SIZE + 0.1,
+                boxIdx: 0
             });
         }
 
@@ -491,7 +677,7 @@ function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
             const boxD = dims.depth || 0.2;
 
             // Get cursor for this shelf
-            const cursor = shelfCursors.get(targetShelf) || { unit: 0, x: -rackWidth / 2 + POST_SIZE + 0.1, z: -rackDepth / 2 + POST_SIZE + 0.1 };
+            const cursor = shelfCursors.get(targetShelf) || { unit: 0, x: -rackWidth / 2 + POST_SIZE + 0.1, z: -rackDepth / 2 + POST_SIZE + 0.1, boxIdx: 0 };
 
             for (let i = 0; i < allocatedCount; i++) {
                 // Check if box fits in current row
@@ -514,8 +700,16 @@ function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
                     }
                 }
 
+                // Generate unique box ID
+                const boxId = `${aisle.id}-${prod.productId}-${targetShelf}-${cursor.unit}-${cursor.boxIdx}`;
+                cursor.boxIdx++;
+
                 // Place the box on the correct shelf level
                 result.get(cursor.unit)!.get(targetShelf)!.push({
+                    boxId,
+                    aisleId: aisle.id,
+                    shelfLevel: targetShelf,
+                    unitIndex: cursor.unit,
                     x: cursor.x + boxW / 2,
                     z: cursor.z + boxD / 2,
                     width: boxW,
@@ -535,7 +729,7 @@ function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
         }
 
         return result;
-    }, [aisle.products, aisle.shelves, aisle.length, inventoryMap, numUnits]);
+    }, [aisle.id, aisle.products, aisle.shelves, aisle.length, inventoryMap, numUnits]);
 
     return (
         <group position={[aisle.x, 0, aisle.z]}>
@@ -562,8 +756,18 @@ function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
                             position={[-rackGap / 2 - rackDepth / 2, 0, unitZ]}
                             boxes={unitBoxes}
                             onBoxClick={onBoxClick}
+                            pickedBoxIds={pickedBoxIds}
+                            showVacantSpots={showVacantSpots}
+                            vacantSpotSize={heldBoxSize}
+                            onVacantSpotClick={(shelfLevel, x, z) =>
+                                onVacantSpotClick?.(aisle.id, unitIdx, shelfLevel, x, z)
+                            }
+                            unitIndex={unitIdx}
+                            aisleId={aisle.id}
+                            targetedSpotId={targetedSpotId}
+                            rackSide="left"
                         />
-                        {/* Right Rack - empty shelves */}
+                        {/* Right Rack - empty shelves, show vacant spots if holding a box */}
                         <RackUnit
                             width={rackWidth}
                             depth={rackDepth}
@@ -572,6 +776,16 @@ function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
                             position={[rackGap / 2 + rackDepth / 2, 0, unitZ]}
                             boxes={[]}
                             onBoxClick={onBoxClick}
+                            pickedBoxIds={pickedBoxIds}
+                            showVacantSpots={showVacantSpots}
+                            vacantSpotSize={heldBoxSize}
+                            onVacantSpotClick={(shelfLevel, x, z) =>
+                                onVacantSpotClick?.(aisle.id, unitIdx, shelfLevel, x, z)
+                            }
+                            unitIndex={unitIdx}
+                            aisleId={aisle.id}
+                            targetedSpotId={targetedSpotId}
+                            rackSide="right"
                         />
                     </group>
                 );
@@ -581,7 +795,23 @@ function AisleRacks({ aisle, inventoryMap, onBoxClick }: {
 }
 
 // Main Scene Component
-function Scene({ onProductClick }: { onProductClick: (data: any) => void }) {
+function Scene({
+    onProductClick,
+    pickedBoxIds,
+    showVacantSpots,
+    heldBoxSize,
+    onVacantSpotClick,
+    placedBoxesData,
+    onPlacedBoxClick
+}: {
+    onProductClick: (data: any) => void;
+    pickedBoxIds?: Set<string>;
+    showVacantSpots?: boolean;
+    heldBoxSize?: { width: number; height: number; depth: number };
+    onVacantSpotClick?: (aisleId: string, unitIndex: number, shelfLevel: number, x: number, z: number) => void;
+    placedBoxesData?: PlacedBoxData[];
+    onPlacedBoxClick?: (placedBox: PlacedBoxData) => void;
+}) {
     // Use direct state access for reactivity (getter functions don't create subscriptions)
     const currentStoreId = useStore((state) => state.currentStoreId);
     const stores = useStore((state) => state.stores);
@@ -597,6 +827,45 @@ function Scene({ onProductClick }: { onProductClick: (data: any) => void }) {
     const inventoryMap = useMemo(() => {
         return inventory.reduce((acc, p) => ({ ...acc, [p.id]: p }), {} as Record<string, InventoryProduct>);
     }, [inventory]);
+
+    // Calculate world positions for placed boxes
+    const rackWidth = 3;
+    const rackDepth = 1.5;
+    const rackGap = 2;
+
+    // Raycast-based targeting for vacant spots (works with pointer lock)
+    const { camera, scene } = useThree();
+    const [targetedSpotId, setTargetedSpotId] = useState<string | null>(null);
+    const raycasterRef = useRef(new THREE.Raycaster());
+
+    // Continuously update targeted spot based on camera direction
+    useFrame(() => {
+        if (!showVacantSpots) {
+            if (targetedSpotId) setTargetedSpotId(null);
+            return;
+        }
+
+        // Raycast from camera center
+        raycasterRef.current.setFromCamera(new THREE.Vector2(0, 0), camera);
+        const intersects = raycasterRef.current.intersectObjects(scene.children, true);
+
+        let foundSpotId: string | null = null;
+        for (const hit of intersects) {
+            let obj = hit.object;
+            while (obj) {
+                if (obj.userData?.isVacantSpot && obj.userData?.vacantSpotId) {
+                    foundSpotId = obj.userData.vacantSpotId;
+                    break;
+                }
+                obj = obj.parent as THREE.Object3D;
+            }
+            if (foundSpotId) break;
+        }
+
+        if (foundSpotId !== targetedSpotId) {
+            setTargetedSpotId(foundSpotId);
+        }
+    });
 
     return (
         <>
@@ -640,6 +909,11 @@ function Scene({ onProductClick }: { onProductClick: (data: any) => void }) {
                     key={aisle.id}
                     aisle={aisle}
                     inventoryMap={inventoryMap}
+                    pickedBoxIds={pickedBoxIds}
+                    showVacantSpots={showVacantSpots}
+                    heldBoxSize={heldBoxSize}
+                    onVacantSpotClick={onVacantSpotClick}
+                    targetedSpotId={targetedSpotId}
                     onBoxClick={(boxData) => {
                         onProductClick({
                             product: boxData.product,
@@ -647,12 +921,83 @@ function Scene({ onProductClick }: { onProductClick: (data: any) => void }) {
                             aisleName: aisle.name,
                             aisleId: aisle.id,
                             productId: boxData.productId,
-                            aisleProducts: aisle.products
+                            aisleProducts: aisle.products,
+                            boxData: boxData  // Pass full box data for grab functionality
                         });
                     }}
                 />
             ))}
+
+            {/* Render placed boxes */}
+            {placedBoxesData?.map(placedBox => {
+                // Find the aisle to get its position
+                const aisle = currentAisles.find(a => a.id === placedBox.aisleId);
+                if (!aisle) return null;
+
+                // Calculate world position
+                const unitZ = placedBox.unitIndex * rackWidth + rackWidth / 2;
+                const rackXOffset = rackGap / 2 + rackDepth / 2;  // Right rack position
+                const levelHeight = aisle.height / aisle.shelves;
+                const shelfY = placedBox.shelfLevel * levelHeight;
+
+                // World position = aisle position + rack offset + shelf position
+                const worldX = aisle.x + rackXOffset;
+                const worldY = shelfY + placedBox.height / 2 + 0.03;
+                const worldZ = aisle.z + unitZ;
+
+                return (
+                    <PlacedBoxMesh
+                        key={placedBox.id}
+                        placedBox={placedBox}
+                        position={[worldX + placedBox.x, worldY, worldZ + placedBox.z]}
+                        onPlacedBoxClick={onPlacedBoxClick}
+                    />
+                );
+            })}
         </>
+    );
+}
+
+// Placed Box Mesh Component - allows raycast detection via userData
+function PlacedBoxMesh({
+    placedBox,
+    position,
+    onPlacedBoxClick
+}: {
+    placedBox: PlacedBoxData;
+    position: [number, number, number];
+    onPlacedBoxClick?: (placedBox: PlacedBoxData) => void;
+}) {
+    const meshRef = useRef<THREE.Mesh>(null);
+
+    // Set userData on mesh for raycast detection
+    useEffect(() => {
+        if (meshRef.current) {
+            meshRef.current.userData = { placedBoxData: placedBox };
+        }
+    }, [placedBox]);
+
+    return (
+        <group
+            position={position}
+            onClick={(e) => {
+                e.stopPropagation();
+                onPlacedBoxClick?.(placedBox);
+            }}
+            onPointerOver={() => { document.body.style.cursor = 'pointer'; }}
+            onPointerOut={() => { document.body.style.cursor = 'auto'; }}
+        >
+            {/* Box mesh with ref for userData */}
+            <mesh ref={meshRef}>
+                <boxGeometry args={[placedBox.width * 0.95, placedBox.height, placedBox.depth * 0.95]} />
+                <meshStandardMaterial color={STATIC_BOX_COLOR} roughness={0.7} />
+            </mesh>
+            {/* Label stripe */}
+            <mesh position={[0, placedBox.height * 0.2, -(placedBox.depth * 0.95) / 2 - 0.002]}>
+                <planeGeometry args={[placedBox.width * 0.85, placedBox.height * 0.3]} />
+                <meshBasicMaterial color={placedBox.labelColor} side={THREE.DoubleSide} />
+            </mesh>
+        </group>
     );
 }
 
@@ -868,10 +1213,12 @@ function ProductEditPanel({
 // First Person Controls Component with Box Interaction
 function FirstPersonControls({
     enabled,
-    onSelectBox
+    onSelectBox,
+    onSelectPlacedBox
 }: {
     enabled: boolean;
     onSelectBox?: (box: BoxData | null) => void;
+    onSelectPlacedBox?: (placedBox: PlacedBoxData) => void;
 }) {
     const { camera, gl, scene } = useThree();
     const moveState = useRef({
@@ -949,6 +1296,12 @@ function FirstPersonControls({
                     // Check if hit object has userData with box info
                     let obj = hit.object;
                     while (obj) {
+                        // Check for placed box first (they should be movable)
+                        if (obj.userData?.placedBoxData) {
+                            onSelectPlacedBox?.(obj.userData.placedBoxData);
+                            return;
+                        }
+                        // Check for regular box
                         if (obj.userData?.boxData) {
                             // SELECT the box (show panel, not grab)
                             onSelectBox?.(obj.userData.boxData);
@@ -982,7 +1335,7 @@ function FirstPersonControls({
                 document.exitPointerLock();
             }
         };
-    }, [enabled, camera, gl, scene, onSelectBox]);
+    }, [enabled, camera, gl, scene, onSelectBox, onSelectPlacedBox]);
 
     useFrame((_, delta) => {
         if (!enabled) return;
@@ -1083,11 +1436,15 @@ export default function Scene3DView() {
     const [selectedProduct, setSelectedProduct] = useState<any>(null);
     const [controlMode, setControlMode] = useState<'orbit' | 'pan' | 'walk'>('orbit');
     const [heldBox, setHeldBox] = useState<BoxData | null>(null);
+    const [pickedBoxIds, setPickedBoxIds] = useState<Set<string>>(new Set());  // Track picked up box IDs
+    const [placedBoxesData, setPlacedBoxesData] = useState<PlacedBoxData[]>([]);  // Store placed boxes with full visual data
     const [pickedUpCount, setPickedUpCount] = useState(0);  // Track boxes picked up this session
-    const { inventory, setInventory, updateAisle, placedBoxes, addPlacedBox, resetPlacedBoxes, getCurrentStore } = useStore();
+    const isPlacingRef = useRef(false);  // Lock to prevent double-placement
+    const { inventory, setInventory, updateAisle, placedBoxes, addPlacedBox, resetPlacedBoxes, getCurrentStore, getCurrentAisles, currentStoreId } = useStore();
 
-    // Get current store for dimensions
+    // Get current store and aisles for dimensions
     const currentStore = getCurrentStore();
+    const currentAisles = getCurrentAisles();
     const storeWidth = currentStore?.width || 100;
     const storeDepth = currentStore?.depth || 100;
 
@@ -1095,25 +1452,206 @@ export default function Scene3DView() {
     const walkStartPosition: [number, number, number] = [storeWidth / 2, 1.7, -3];  // Center of front wall, outside door
     const orbitPosition: [number, number, number] = [storeWidth / 2 + 30, 25, storeDepth / 2 + 30];
 
-    // Load inventory on mount
+    // Load inventory and placed boxes on mount
     useEffect(() => {
         const initData = async () => {
-            if (inventory.length === 0) {
-                try {
-                    const { getCurrentUser } = await import('@/lib/auth');
-                    const { getUserInventory } = await import('@/lib/db');
-                    const user = await getCurrentUser();
-                    if (user) {
+            try {
+                const { getCurrentUser } = await import('@/lib/auth');
+                const { getUserInventory, getStorePlacedBoxes } = await import('@/lib/db');
+                const user = await getCurrentUser();
+                if (user) {
+                    // Load inventory
+                    if (inventory.length === 0) {
                         const data = await getUserInventory(user.uid);
                         if (data.length > 0) setInventory(data);
                     }
-                } catch (e) {
-                    console.error("Failed to load inventory for 3D view", e);
+
+                    // Load placed boxes from database
+                    if (currentStoreId) {
+                        const savedPlacedBoxes = await getStorePlacedBoxes(currentStoreId);
+                        if (savedPlacedBoxes.length > 0) {
+                            // Convert to local format
+                            const localBoxes: PlacedBoxData[] = savedPlacedBoxes.map(box => ({
+                                id: box.id || `placed-${Date.now()}`,
+                                aisleId: box.aisleId,
+                                unitIndex: box.unitIndex,
+                                shelfLevel: box.shelfLevel,
+                                x: box.x,
+                                z: box.z,
+                                width: box.width,
+                                height: box.height,
+                                depth: box.depth,
+                                labelColor: box.labelColor,
+                                productId: box.productId,
+                                productName: box.productName
+                            }));
+                            setPlacedBoxesData(localBoxes);
+
+                            // Also track their source boxes as picked
+                            const pickedIds = new Set<string>();
+                            savedPlacedBoxes.forEach(box => {
+                                pickedIds.add(box.boxId);
+                            });
+                            setPickedBoxIds(pickedIds);
+                            setPickedUpCount(savedPlacedBoxes.length);
+                        }
+                    }
                 }
+            } catch (e) {
+                console.error("Failed to load data for 3D view", e);
             }
         };
         initData();
-    }, [inventory.length, setInventory]);
+    }, [inventory.length, setInventory, currentStoreId]);
+
+    // Handle grabbing a box
+    const handleGrabBox = (boxData: BoxData) => {
+        setHeldBox(boxData);
+        setPickedBoxIds(prev => new Set(prev).add(boxData.boxId));
+        setPickedUpCount(prev => prev + 1);
+        setSelectedProduct(null);
+    };
+
+
+    // Handle placing a box on a vacant spot
+    const handlePlaceBox = async (aisleId: string, unitIndex: number, shelfLevel: number, x: number, z: number) => {
+        // Prevent double-placement
+        if (!heldBox || !currentStoreId || isPlacingRef.current) return;
+        isPlacingRef.current = true;
+
+        // Store full visual data for rendering
+        const newPlacedBox: PlacedBoxData = {
+            id: `placed-${Date.now()}`,
+            aisleId: aisleId,
+            unitIndex: unitIndex,
+            shelfLevel: shelfLevel,
+            x: x,
+            z: z,
+            width: heldBox.width,
+            height: heldBox.height,
+            depth: heldBox.depth,
+            labelColor: heldBox.labelColor,
+            productId: heldBox.productId,
+            productName: heldBox.product.name
+        };
+
+        setPlacedBoxesData(prev => [...prev, newPlacedBox]);
+
+        // Also add to store for tracking/persistence
+        addPlacedBox({
+            id: newPlacedBox.id,
+            productId: heldBox.productId,
+            aisleId: aisleId,
+            shelfLevel: shelfLevel,
+            positionX: x,
+            positionZ: z,
+            sourceAisleId: heldBox.aisleId,
+            sourceShelfLevel: heldBox.shelfLevel
+        });
+
+        // Save to database for persistence
+        try {
+            const { getCurrentUser } = await import('@/lib/auth');
+            const { savePlacedBox } = await import('@/lib/db');
+            const user = await getCurrentUser();
+            if (user) {
+                await savePlacedBox({
+                    boxId: heldBox.boxId,
+                    productId: heldBox.productId,
+                    productName: heldBox.product.name,
+                    aisleId: aisleId,
+                    unitIndex: unitIndex,
+                    shelfLevel: shelfLevel,
+                    x: x,
+                    z: z,
+                    width: heldBox.width,
+                    height: heldBox.height,
+                    depth: heldBox.depth,
+                    labelColor: heldBox.labelColor,
+                    userId: user.uid,
+                    storeId: currentStoreId,
+                    sourceAisleId: heldBox.aisleId,
+                    sourceShelfLevel: heldBox.shelfLevel
+                });
+                console.log('Box placement saved to database');
+            }
+        } catch (e) {
+            console.error('Failed to save box placement to database:', e);
+        }
+
+        // Clear held box and release lock
+        setHeldBox(null);
+        isPlacingRef.current = false;
+    };
+
+    // Handle reset - restore all picked boxes
+    const handleReset = async () => {
+        resetPlacedBoxes();
+        setPlacedBoxesData([]);
+        setPickedBoxIds(new Set());
+        setPickedUpCount(0);
+        setHeldBox(null);
+
+        // Delete all placed boxes from database
+        if (currentStoreId) {
+            try {
+                const { resetStorePlacedBoxes } = await import('@/lib/db');
+                await resetStorePlacedBoxes(currentStoreId);
+                console.log('Placed boxes cleared from database');
+            } catch (e) {
+                console.error('Failed to reset placed boxes in database:', e);
+            }
+        }
+    };
+
+    // Handle grabbing a placed box to move it again
+    const handleGrabPlacedBox = async (placedBox: PlacedBoxData) => {
+        // Don't allow grabbing if already holding a box
+        if (heldBox) return;
+
+        // Find the product info from inventory
+        const product = inventory.find(p => p.id === placedBox.productId);
+        if (!product) {
+            console.error('Product not found for placed box:', placedBox.productId);
+            return;
+        }
+
+        // Create BoxData from PlacedBoxData
+        const boxData: BoxData = {
+            boxId: `placed-${placedBox.id}`,  // Use placed box id as the box id
+            aisleId: placedBox.aisleId,
+            shelfLevel: placedBox.shelfLevel,
+            unitIndex: placedBox.unitIndex,
+            x: placedBox.x,
+            z: placedBox.z,
+            width: placedBox.width,
+            height: placedBox.height,
+            depth: placedBox.depth,
+            labelColor: placedBox.labelColor,
+            productId: placedBox.productId,
+            product: product,
+            quantity: 1
+        };
+
+        // Remove from placedBoxesData (visually remove) first
+        setPlacedBoxesData(prev => prev.filter(pb => pb.id !== placedBox.id));
+
+        // Set as held box
+        setHeldBox(boxData);
+
+        // Try to delete from database (non-blocking, box is already in hand)
+        // Database will be synced on next reset or when box is placed again
+        if (placedBox.id) {
+            try {
+                const { deletePlacedBox } = await import('@/lib/db');
+                await deletePlacedBox(placedBox.id);
+                console.log('Placed box removed from database for re-placement');
+            } catch (e) {
+                // Silently ignore - box is in hand and will be re-saved when placed
+                console.warn('Could not delete placed box from database (will be cleaned up on reset):', e);
+            }
+        }
+    };
 
     return (
         <div className="w-full h-full relative bg-gray-900">
@@ -1163,8 +1701,22 @@ export default function Scene3DView() {
                             setSelectedProduct(null);
                         }
                     }}
+                    onSelectPlacedBox={(placedBox: PlacedBoxData) => {
+                        // Directly grab the placed box when clicked
+                        if (!heldBox) {
+                            handleGrabPlacedBox(placedBox);
+                        }
+                    }}
                 />
-                <Scene onProductClick={setSelectedProduct} />
+                <Scene
+                    onProductClick={setSelectedProduct}
+                    pickedBoxIds={pickedBoxIds}
+                    showVacantSpots={heldBox !== null && controlMode === 'walk'}
+                    heldBoxSize={heldBox ? { width: heldBox.width, height: heldBox.height, depth: heldBox.depth } : undefined}
+                    onVacantSpotClick={handlePlaceBox}
+                    placedBoxesData={placedBoxesData}
+                    onPlacedBoxClick={handleGrabPlacedBox}
+                />
                 {controlMode === 'walk' && <CarriedBox box={heldBox} />}
             </Canvas>
 
@@ -1239,11 +1791,7 @@ export default function Scene3DView() {
                 )}
                 {(pickedUpCount > 0 || placedBoxes.length > 0) && (
                     <button
-                        onClick={() => {
-                            resetPlacedBoxes();
-                            setPickedUpCount(0);
-                            setHeldBox(null);
-                        }}
+                        onClick={handleReset}
                         className="flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium transition-all bg-orange-600 text-white hover:bg-orange-700"
                         title="Reset all moved boxes to original positions"
                     >
@@ -1281,8 +1829,7 @@ export default function Scene3DView() {
                     onGrabBox={() => {
                         // Enter grab mode with the selected box
                         if (selectedProduct.boxData) {
-                            setHeldBox(selectedProduct.boxData);
-                            setPickedUpCount(prev => prev + 1);
+                            handleGrabBox(selectedProduct.boxData);
                         }
                     }}
                     onSave={async (updatedProduct) => {
