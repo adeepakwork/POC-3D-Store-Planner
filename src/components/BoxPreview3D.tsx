@@ -25,15 +25,15 @@ function MeasurementLine({ start, end, label, offset = [0, 0, 0] }: { start: [nu
         (start[2] + end[2]) / 2 + offset[2],
     ];
 
+    const positions = new Float32Array([...start, ...end]);
+
     return (
         <group>
             <line>
                 <bufferGeometry>
                     <bufferAttribute
                         attach="attributes-position"
-                        count={2}
-                        array={new Float32Array([...start, ...end])}
-                        itemSize={3}
+                        args={[positions, 3]}
                     />
                 </bufferGeometry>
                 <lineBasicMaterial color="#ef4444" linewidth={2} />
